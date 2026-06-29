@@ -9,15 +9,11 @@ function isAdmin(ctx) {
   return String(ctx.from?.id) === String(config.bot.adminChatId);
 }
 
-// ─── SESSION STORES ───────────────────────────────────────────────────────────
-const broadcastSessions = {};   // userId → { step, type, content, target, pin }
-const actionSessions    = {};   // userId → { action }
-const editSessions      = {};   // userId → { field, context }
+const broadcastSessions = {};
+const actionSessions    = {};
+const editSessions      = {};
 
-// ─── TODAY HELPER ─────────────────────────────────────────────────────────────
 function todayUTC() { return new Date().toISOString().split('T')[0]; }
-
-// ─── ADMIN PANEL (inline) ────────────────────────────────────────────────────
 
 async function showAdminPanel(ctx, edit = false) {
   const users   = db.users;
@@ -88,8 +84,6 @@ async function showAdminPanel(ctx, edit = false) {
   }
 }
 
-// ─── USERS ────────────────────────────────────────────────────────────────────
-
 async function handleAdminUsers(ctx) {
   await ctx.answerCbQuery().catch(() => {});
   const all   = db.users.getAll().slice(0, 30);
@@ -101,9 +95,8 @@ async function handleAdminUsers(ctx) {
     const bot = u.auto_trading ? '🤖' : '—';
     const ban = u.banned ? ' 🚫' : '';
     const mkt = u.market_type ? `[${u.market_type[0].toUpperCase()}]` : '';
-    const rec = u.recovery_mode ? ' 🔄' : '';
     msg +=
-      `${sub}${bot}${ban}${rec} ${mkt} <b>${u.first_name || u.username || 'N/A'}</b>\n` +
+      `${sub}${bot}${ban} ${mkt} <b>${u.first_name || u.username || 'N/A'}</b>\n` +
       `  ID: <code>${u.telegram_id}</code>  Bal: ${(u.balance || 0).toFixed(2)} USDT  Trades: ${u.total_trades || 0}  WR: ${u.win_rate || 0}%\n\n`;
   }
   if (total > 30) msg += `<i>...and ${total - 30} more</i>`;
@@ -115,8 +108,6 @@ async function handleAdminUsers(ctx) {
     await ctx.reply(msg, { parse_mode: 'HTML', ...kb });
   }
 }
-
-// ─── TRADES ──────────────────────────────────────────────────────────────────
 
 async function handleAdminTrades(ctx) {
   await ctx.answerCbQuery().catch(() => {});
@@ -141,8 +132,6 @@ async function handleAdminTrades(ctx) {
     await ctx.reply(msg, { parse_mode: 'HTML', ...kb });
   }
 }
-
-// ─── STATISTICS ───────────────────────────────────────────────────────────────
 
 async function handleAdminStats(ctx) {
   await ctx.answerCbQuery().catch(() => {});
@@ -171,7 +160,6 @@ async function handleAdminStats(ctx) {
     return `${list.length} trades  ✅${w.length} ❌${l.length}  WR: ${wr}%  PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} USDT`;
   }
 
-  const recoveryUsers = users.filter((u) => u.recovery_mode).length;
   const pausedUsers   = users.filter((u) => u.trading_paused).length;
 
   const msg =
@@ -179,8 +167,7 @@ async function handleAdminStats(ctx) {
     `👥 <b>Users</b>\n` +
     `  Total: ${users.length}  Premium: ${db.users.countPremium()}  Free: ${db.users.countFree()}\n` +
     `  Spot: ${db.users.countSpot()}  Futures: ${db.users.countFutures()}\n` +
-    `  Auto Trading: ${db.users.countActive()}  Banned: ${db.users.countBanned()}\n` +
-    `  Recovery Mode: ${recoveryUsers}  Paused Today: ${pausedUsers}\n\n` +
+    `  Auto Trading: ${db.users.countActive()}  Banned: ${db.users.countBanned()}\n\n` +
     `📅 <b>Today</b>\n  ${periodStats([...closed].filter((t) => t.close_time?.startsWith(todayUTC())))}\n\n` +
     `📆 <b>This Week</b>\n  ${periodStats(weekClosed)}\n\n` +
     `🗓 <b>This Month</b>\n  ${periodStats(monthClosed)}\n\n` +
@@ -198,8 +185,6 @@ async function handleAdminStats(ctx) {
     await ctx.reply(msg, { parse_mode: 'HTML', ...kb });
   }
 }
-
-// ─── REVENUE (reads from dynamic payment settings) ───────────────────────────
 
 async function handleAdminRevenue(ctx) {
   await ctx.answerCbQuery().catch(() => {});
@@ -234,8 +219,6 @@ async function handleAdminRevenue(ctx) {
     await ctx.reply(msg, { parse_mode: 'HTML', ...kb });
   }
 }
-
-// ─── SETTINGS ─────────────────────────────────────────────────────────────────
 
 async function handleAdminSettings(ctx) {
   await ctx.answerCbQuery().catch(() => {});
@@ -285,8 +268,6 @@ async function handleSettingCommand(ctx) {
   await ctx.reply(`✅ <b>${dbKey}</b> updated to <code>${parsed}</code>`, { parse_mode: 'HTML' });
   return true;
 }
-
-// ─── PAYMENT SETTINGS ─────────────────────────────────────────────────────────
 
 async function handleAdminPayment(ctx) {
   await ctx.answerCbQuery().catch(() => {});
@@ -344,8 +325,6 @@ async function promptPaymentEdit(ctx, field) {
   );
 }
 
-// ─── HELP SETTINGS ────────────────────────────────────────────────────────────
-
 async function handleAdminHelpSettings(ctx) {
   await ctx.answerCbQuery().catch(() => {});
   const h = db.help.get();
@@ -388,8 +367,6 @@ async function promptHelpEdit(ctx, field) {
   );
 }
 
-// ─── HANDLE EDIT INPUT (payment/help settings) ─────────────────────────────────
-
 async function handleEditInput(ctx) {
   const uid     = ctx.from.id;
   const session = editSessions[uid];
@@ -428,8 +405,6 @@ async function handleEditInput(ctx) {
   return true;
 }
 
-// ─── LOGS ─────────────────────────────────────────────────────────────────────
-
 async function handleAdminLogs(ctx) {
   await ctx.answerCbQuery().catch(() => {});
   const logger = require('./logger');
@@ -442,8 +417,6 @@ async function handleAdminLogs(ctx) {
     await ctx.reply(msg, { parse_mode: 'HTML', ...kb });
   }
 }
-
-// ─── BROADCAST MENU ───────────────────────────────────────────────────────────
 
 async function showBroadcastMenu(ctx) {
   await ctx.answerCbQuery().catch(() => {});
@@ -619,8 +592,6 @@ async function executeBroadcast(ctx, pin, bot) {
   }
 }
 
-// ─── CHANNEL SETTINGS ────────────────────────────────────────────────────────
-
 async function showChannelMenu(ctx) {
   await ctx.answerCbQuery().catch(() => {});
   const cfg = db.channel.get();
@@ -684,8 +655,6 @@ async function handleChannelTest(ctx) {
     await ctx.reply(`❌ <b>Channel Test Failed</b>\n\nError: ${result.error}`, { parse_mode: 'HTML' });
   }
 }
-
-// ─── USER ACTIONS ─────────────────────────────────────────────────────────────
 
 async function promptAction(ctx, action) {
   await ctx.answerCbQuery().catch(() => {});
@@ -757,8 +726,6 @@ async function handleActionInput(ctx, bot) {
   delete actionSessions[uid];
 }
 
-// ─── EXPORT ──────────────────────────────────────────────────────────────────
-
 async function handleExport(ctx) {
   await ctx.answerCbQuery().catch(() => {});
   try {
@@ -782,16 +749,12 @@ async function handleExport(ctx) {
   }
 }
 
-// ─── RESTART ─────────────────────────────────────────────────────────────────
-
 async function handleRestart(ctx) {
   await ctx.answerCbQuery().catch(() => {});
   await ctx.reply('🔄 Restarting bot process...', { parse_mode: 'HTML' });
   logger.info('Admin requested restart');
   setTimeout(() => process.exit(0), 1000);
 }
-
-// ─── CHANNEL COMMAND HANDLER ─────────────────────────────────────────────────
 
 async function handleChannelCommand(ctx) {
   const text = ctx.message?.text?.trim() || '';
@@ -806,8 +769,6 @@ async function handleChannelCommand(ctx) {
   return true;
 }
 
-
-// ─── BOT STATUS (/status admin command) ──────────────────────────────────────
 async function handleAdminStatus(ctx) {
   if (!isAdmin(ctx)) return ctx.reply('⛔ Unauthorized.');
   await ctx.answerCbQuery?.().catch(() => {});
@@ -827,16 +788,14 @@ async function handleAdminStatus(ctx) {
   const allUsers  = db.users.getAll();
   const openTrades = db.trades.countOpen();
   const totalUsers = allUsers.length;
-  const apiUsers   = allUsers.filter((u) => u.api_key).length;
+  const apiUsers   = allUsers.filter((u) => u.api_key_spot || u.api_key_testnet).length;
 
-  // Cooldown keys currently active
   const cooldownStore = db.cooldown.getAll();
   const now           = Date.now();
   const ttl           = 4 * 60 * 60 * 1000;
   const activeCooldowns = Object.entries(cooldownStore)
     .filter(([, ts]) => now - ts < ttl);
 
-  // Last sync times — show the 5 most-recently synced users
   const recentSyncs = allUsers
     .filter((u) => u.last_binance_sync)
     .sort((a, b) => new Date(b.last_binance_sync) - new Date(a.last_binance_sync))
