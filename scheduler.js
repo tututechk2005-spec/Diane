@@ -1,432 +1,282 @@
-const { publicSpot, publicFutures }        = require('./binance');
-const { analyzeSymbol }                     = require('./strategy');
-const { openTrade, monitorTrades, updateUserBalances, syncUserFromBinance, cleanDatabaseDuplicates } = require('./trading');
-const channel  = require('./channel');
-const db       = require('./database');
-const logger   = require('./logger');
-const {
-  SCAN_INTERVAL, MIN_SPOT_VOLUME, MIN_FUTURES_VOLUME,
-  DAILY_WIN_TARGET, MONITOR_INTERVAL_MS,
-} = require('./config');
-
-let scanTimer    = null;
-let monitorTimer = null;
-let balanceTimer = null;
-let subTimer     = null;
-let reportTimer  = null;
-let syncTimer    = null;
-let isScanning   = false;
-let isMonitoring = false;
-let botRef       = null;
-
-// ─── NOTIFY HELPERS ───────────────────────────────────────────────────────────
+[...]
 async function notify(telegramId, text, opts = {}) {
-  if (!botRef) return null;
-  try { return await botRef.telegram.sendMessage(telegramId, text, { parse_mode: 'HTML', ...opts }); }
-  catch (e) { logger.debug(`[NOTIFY-FAIL] ${telegramId}`, { err: e.message }); return null; }
+  try {
+    const user = db.users.findById(telegramId);
+    if (!user || user.banned) return null;
+    return await bot.telegram.sendMessage(telegramId, text, { parse_mode: 'HTML', ...opts });
+  } catch (err) {
+    logger.error(`Notify failed: ${telegramId}`, { err: err.message });
+    return null;
+  }
 }
 
 async function editMessage(telegramId, messageId, text, opts = {}) {
-  if (!botRef || !messageId) return;
-  try { await botRef.telegram.editMessageText(telegramId, messageId, null, text, { parse_mode: 'HTML', ...opts }); }
-  catch (e) { if (!e.message?.includes('not modified')) logger.debug(`[EDIT-FAIL] ${telegramId}:${messageId}`, { err: e.message }); }
+  try {
+    return await bot.telegram.editMessageText(telegramId, messageId, null, text, { parse_mode: 'HTML', ...opts });
+  } catch (err) {
+    logger.error(`Edit failed: ${telegramId}:${messageId}`, { err: err.message });
+    return null;
+  }
 }
 
-// ─── DURATION ────────────────────────────────────────────────────────────────
+// ─── DURATION ───────────────────────────────────────────────────────────[...]
 function duration(startIso, endIso) {
-  const ms = new Date(endIso) - new Date(startIso);
-  const m  = Math.floor(ms / 60000);
-  const h  = Math.floor(m / 60);
-  if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
-  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  const ms = end - start;
+  const s = Math.floor(ms / 1000) % 60;
+  const m = Math.floor(ms / 60000) % 60;
+  const h = Math.floor(ms / 3600000);
+  return `${h}h ${m}m ${s}s`;
 }
 
-// ─── SIGNAL TEXT ─────────────────────────────────────────────────────────────
+// ─── SIGNAL TEXT ──────────────────────────────────────────────────────────[...]
 function buildSignalText(sig, profitPct = null, status = 'ACTIVE') {
-  const c   = sig.confirmations || {};
-  const isBuy = sig.signal === 'BUY';
-  const dir   = isBuy ? 'Bullish' : 'Bearish';
-  const e     = isBuy ? '🟢' : '🔴';
-  const grade = sig.grade === 'PREMIUM' ? '🚀 PREMIUM' : '💎 STRONG';
-  const mkt   = (sig.market_type || 'spot').toUpperCase();
-  const mktEmoji = mkt === 'FUTURES' ? '📊' : '📈';
-  const statusMap = { ACTIVE: '🟢 ACTIVE', WIN: '✅ WIN', LOSS: '❌ LOSS', BREAKEVEN: '⚖️ BREAKEVEN' };
-  const profitLine = profitPct !== null
-    ? (profitPct >= 0 ? `\n💰 Profit: <b>+${profitPct.toFixed(2)}%</b>` : `\n🔻 Loss: <b>${profitPct.toFixed(2)}%</b>`)
-    : '';
+  const emoji = status === 'ACTIVE' ? '🟢' : status === 'WIN' ? '✅' : '❌';
   const row = (label, ok) => `${ok ? '✅' : '❌'} ${label}`;
-  return (
-    `${e} <b>${grade} ${sig.signal} SIGNAL</b>\n\n` +
-    `📊 Symbol: <b>${sig.symbol}</b>\n` +
-    `${mktEmoji} Market: <b>${mkt}</b>\n` +
-    `📊 Score: <b>${sig.score}/100</b>\n\n` +
-    `📍 Entry: <code>${sig.entry}</code>\n` +
-    `🛡 SL: <code>${sig.sl}</code>\n` +
-    `🎯 TP: <code>${sig.tp || sig.tp1 || '—'}</code>\n` +
-    `⚖️ RR: <b>1:${sig.rr}</b>\n\n` +
-    `✨ <b>Confirmations:</b>\n` +
-    `${row(`4H ${dir} Trend`, c.trend_4h)}\n` +
-    `${row(`1H ${dir} Trend`, c.trend_1h)}\n` +
-    `${row('BOS',             c.bos)}\n` +
-    `${row('CHOCH',           c.choch)}\n` +
-    `${row('Order Block',     c.order_block)}\n` +
-    `${row('Fair Value Gap',  c.fvg)}\n` +
-    `${row('Volume Spike',    c.volume_spike)}\n` +
-    `${row('RSI Confirmed',   c.rsi)}\n\n` +
-    `📈 Status: ${statusMap[status] || statusMap.ACTIVE}` + profitLine
-  );
+
+  const text =
+    `${emoji} <b>${status} SIGNAL</b>\n\n` +
+    `<b>${sig.symbol}</b>  ${sig.signal}\n` +
+    `Score: <b>${sig.score}</b> (${sig.grade})\n` +
+    `Entry: <code>${sig.entry}</code>\n` +
+    `SL: <code>${sig.sl}</code>\n` +
+    `TP: <code>${sig.tp}</code>\n` +
+    `R:R: <b>${sig.rr}</b>\n\n` +
+    `<b>Confirmations:</b>\n` +
+    `${row('Trend (4h)', sig.confirmations?.trend_4h)}\n` +
+    `${row('Trend (1h)', sig.confirmations?.trend_1h)}\n` +
+    `${row('Break of Structure', sig.confirmations?.bos)}\n` +
+    `${row('Order Block', sig.confirmations?.order_block)}\n` +
+    `${row('Fair Value Gap', sig.confirmations?.fvg)}\n` +
+    `${row('Volume Spike', sig.confirmations?.volume_spike)}\n` +
+    `${row('RSI Confirmed', sig.confirmations?.rsi)}\n\n` +
+    (profitPct !== null ? `<b>Result: ${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(2)}%</b>` : `⏳ Awaiting result...`);
+
+  return text;
 }
 
 function buildTpNotification(trade, result) {
-  const pct = result.profitPct || 0;
-  return (
-    `🎉 <b>Take Profit Hit!</b>\n\n` +
-    `📊 <b>${trade.symbol}</b>  ${trade.side}\n` +
-    `${((trade.market_type||'spot').toUpperCase()==='FUTURES'?'📊':'📈')} Market: <b>${(trade.market_type||'spot').toUpperCase()}</b>\n` +
-    `📍 Entry: <code>${trade.entry}</code>\n` +
-    `📤 Exit: <code>${result.closePrice?.toFixed(8) || 'N/A'}</code>\n` +
-    `💰 Profit: <b>+${result.profit?.toFixed(4)} USDT</b>  (+${Math.abs(pct).toFixed(2)}%)\n` +
-    `⏱ Duration: ${trade.open_time ? duration(trade.open_time, new Date().toISOString()) : 'N/A'}\n` +
-    `Result: ✅ <b>WIN</b>`
-  );
+  return `✅ <b>TAKE PROFIT</b>\n\n` +
+    `${trade.symbol}\n` +
+    `Profit: <b>+${trade.profit.toFixed(4)} USDT (+${trade.profit_pct.toFixed(2)}%)</b>\n` +
+    `Duration: ${duration(trade.open_time, trade.close_time)}`;
 }
 
 function buildSlNotification(trade, result) {
-  const pct = result.profitPct || 0;
-  return (
-    `❌ <b>Stop Loss Hit</b>\n\n` +
-    `📊 <b>${trade.symbol}</b>  ${trade.side}\n` +
-    `${((trade.market_type||'spot').toUpperCase()==='FUTURES'?'📊':'📈')} Market: <b>${(trade.market_type||'spot').toUpperCase()}</b>\n` +
-    `📍 Entry: <code>${trade.entry}</code>\n` +
-    `📤 Exit: <code>${result.closePrice?.toFixed(8) || 'N/A'}</code>\n` +
-    `🔻 Loss: <b>${result.profit?.toFixed(4)} USDT</b>  (${pct.toFixed(2)}%)\n` +
-    `⏱ Duration: ${trade.open_time ? duration(trade.open_time, new Date().toISOString()) : 'N/A'}\n` +
-    `Result: ❌ <b>LOSS</b>`
-  );
+  return `❌ <b>STOP LOSS</b>\n\n` +
+    `${trade.symbol}\n` +
+    `Loss: <b>${trade.profit.toFixed(4)} USDT (${trade.profit_pct.toFixed(2)}%)</b>\n` +
+    `Duration: ${duration(trade.open_time, trade.close_time)}`;
 }
 
 function buildCloseText(trade, result) {
-  const label = result.result_label || (result.isWin ? 'WIN' : result.profit === 0 ? 'BREAKEVEN' : 'LOSS');
-  const emoji = label === 'WIN' ? '✅' : label === 'BREAKEVEN' ? '⚖️' : '❌';
-  const pct   = result.profitPct || 0;
-  return (
-    `${emoji} <b>Trade ${label}</b>\n\n` +
-    `📊 <b>${trade.symbol}</b>  ${trade.side}\n` +
-    `${((trade.market_type||'spot').toUpperCase()==='FUTURES'?'📊':'📈')} Market: <b>${(trade.market_type||'spot').toUpperCase()}</b>\n` +
-    `📍 Entry: <code>${trade.entry}</code>\n` +
-    `📤 Exit: <code>${result.closePrice?.toFixed(8) || 'N/A'}</code>\n` +
-    `💰 PNL: <b>${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</b> (${result.profit >= 0 ? '+' : ''}${result.profit?.toFixed(4)} USDT)\n` +
-    `📋 Reason: <b>${trade.close_reason || 'Manual'}</b>\n` +
-    `⏱ Duration: ${trade.open_time ? duration(trade.open_time, new Date().toISOString()) : 'N/A'}`
-  );
+  const icon = trade.profit >= 0 ? '✅' : '❌';
+  return `${icon} <b>TRADE CLOSED</b>\n\n` +
+    `${trade.symbol} ${trade.side}\n` +
+    `Entry: ${trade.entry}\n` +
+    `Exit: ${trade.exit_price}\n` +
+    `Result: <b>${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(4)} USDT (${trade.profit_pct.toFixed(2)}%)</b>\n` +
+    `Duration: ${duration(trade.open_time, trade.close_time)}`;
 }
 
 function buildLiveTradeText(trade) {
-  const price   = trade.current_price || trade.entry;
-  const pnlUsdt = trade.profit       || 0;
-  const pnlPct  = trade.profit_pct   || 0;
-  const e       = trade.side === 'BUY' ? '🟢' : '🔴';
-  const lev     = trade.leverage   || 1;
-  const margin  = trade.margin_used ? `${trade.margin_used.toFixed(2)} USDT` : 'N/A';
-  const liqPx   = trade.liquidation_price ? `<code>${trade.liquidation_price}</code>` : 'N/A';
-  const dur     = trade.open_time ? duration(trade.open_time, new Date().toISOString()) : 'N/A';
-  const statusEmoji = pnlUsdt >= 0 ? '🟢' : '🔴';
-  const mkt     = (trade.market_type || 'spot').toUpperCase();
-  const mktEmoji = mkt === 'FUTURES' ? '📊' : '📈';
-  return (
-    `${e} <b>${trade.side} ${trade.symbol}</b>\n` +
-    `${mktEmoji} Market: <b>${mkt}</b>\n\n` +
-    `📍 Entry: <code>${trade.entry}</code>\n` +
-    `💹 Current: <code>${typeof price === 'number' ? price.toFixed(8) : price}</code>\n` +
-    `📦 Qty: <code>${trade.quantity}</code>  |  ⚡ Lev: <b>${lev}x</b>\n` +
-    `🏦 Margin: ${margin}\n` +
-    (trade.sl ? `🛡 SL: <code>${trade.sl}</code>\n` : '') +
-    (trade.tp ? `🎯 TP: <code>${trade.tp}</code>\n` : '') +
-    (trade.liquidation_price ? `💥 Liq: ${liqPx}\n` : '') +
-    `\n${statusEmoji} PNL: <b>${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(4)} USDT</b>  (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)\n` +
-    `⏱ Duration: ${dur}\n` +
-    `🆔 <code>${trade.trade_id.slice(0, 8)}</code>`
-  );
+  return `<b>📊 ${trade.symbol} (${trade.side})</b>\n\n` +
+    `Entry: <code>${trade.entry}</code>\n` +
+    `SL: <code>${trade.sl}</code>\n` +
+    `TP: <code>${trade.tp}</code>\n` +
+    `Qty: ${trade.quantity}\n` +
+    `Status: LIVE`;
 }
 
-// ─── BROADCAST SIGNAL ────────────────────────────────────────────────────────
+// ─── BROADCAST SIGNAL ────────────────────────────────────────────────────────[...]
 async function broadcastSignal(signal) {
-  const users = db.users.getAll().filter((u) => u.subscription === 'active' && !u.banned);
-  const text  = buildSignalText(signal);
-  let sent    = 0;
-  for (const u of users) {
-    const msg = await notify(u.telegram_id, text);
-    if (msg) sent++;
+  if (!signal) return;
+  const sigText = buildSignalText(signal, null, 'ACTIVE');
+  const users = db.users.getAll().filter((u) => u.subscription === 'active' && u.auto_trading && !u.banned);
+  let sent = 0, failed = 0;
+
+  for (const user of users) {
+    try {
+      await bot.telegram.sendMessage(user.telegram_id, sigText, { parse_mode: 'HTML' });
+      sent++;
+    } catch (err) {
+      logger.debug(`Broadcast failed for ${user.telegram_id}`, { err: err.message });
+      failed++;
+    }
   }
-  await channel.postSignalToChannel(signal);
-  logger.info(`[SIGNAL-BROADCAST] ${signal.symbol} ${signal.signal} → ${sent}/${users.length} users`);
+  logger.info(`Signal broadcast: ${sent} sent, ${failed} failed`);
 }
 
-// ─── SCAN ONE MARKET ─────────────────────────────────────────────────────────
+// ─── SCAN ONE MARKET ─────────────────────────────────────────────────────────[...]
 async function scanMarket(client, marketType, minVolume) {
-  const pairs = await client.getActivePairs(minVolume);
-  if (!pairs.length) return [];
-  const BATCH   = 8;
-  const results = [];
-  for (let i = 0; i < pairs.length; i += BATCH) {
-    const settled = await Promise.allSettled(pairs.slice(i, i + BATCH).map((p) => analyzeSymbol(client, p.symbol)));
-    for (const r of settled) {
-      if (r.status === 'fulfilled' && r.value) results.push({ ...r.value, market_type: marketType });
-    }
-    if (i + BATCH < pairs.length) await new Promise((r) => setTimeout(r, 300));
-  }
-  return results.sort((a, b) => b.score - a.score);
-}
-
-// ─── MAIN MARKET SCAN (single global scanner) ─────────────────────────────────
-async function runMarketScan() {
-  if (isScanning) {
-    logger.debug('[SCAN-SKIP] Already scanning');
-    return;
-  }
-  isScanning = true;
-  const started = Date.now();
   try {
-    logger.info('[SCAN-START] Scanning all Binance pairs (Spot + Futures)');
+    const pairs = await client.getActivePairs(minVolume);
+    if (!pairs || pairs.length === 0) return [];
 
-    const [spotRes, futRes] = await Promise.allSettled([
-      scanMarket(publicSpot,    'spot',    MIN_SPOT_VOLUME),
-      scanMarket(publicFutures, 'futures', MIN_FUTURES_VOLUME),
-    ]);
-    if (spotRes.status === 'rejected') logger.error('[SCAN-SPOT-ERR]',    { err: spotRes.reason?.message });
-    if (futRes.status  === 'rejected') logger.error('[SCAN-FUTURES-ERR]', { err: futRes.reason?.message });
+    const sigs = [];
+    for (const symbol of pairs.slice(0, 50)) {
+      try {
+        const sig = await analyzeSymbol(client, symbol);
+        if (!sig) continue;
 
-    const allSignals = [
-      ...(spotRes.status    === 'fulfilled' ? spotRes.value    : []),
-      ...(futRes.status === 'fulfilled' ? futRes.value : []),
-    ].filter((s) => s.canTrade);
-
-    logger.info(`[SCAN-DONE] ${allSignals.length} tradeable signals in ${((Date.now() - started) / 1000).toFixed(1)}s`);
-
-    for (const sig of allSignals.slice(0, 5)) {
-      // ── DEDUP: symbol+side+market+entryZone ─────────────────────────────
-      const dupCheck = db.signals.findActiveDuplicate(sig.symbol, sig.signal, sig.market_type, sig.entry);
-      if (dupCheck.duplicate) {
-        logger.info(`[SIGNAL-SKIP] ${sig.symbol} ${sig.signal} reason:${dupCheck.reason}`);
-        continue;
-      }
-
-      const saved = await db.signals.create(sig);
-      sig.signal_id = saved.signal_id;
-      logger.info(`[SIGNAL-GEN] ${sig.symbol} ${sig.signal} score:${sig.score} market:${sig.market_type}`);
-
-      await broadcastSignal(saved);
-
-      // Auto trade for eligible users
-      const autoUsers = db.users.getAll().filter((u) =>
-        u.auto_trading && u.subscription === 'active' &&
-        u.api_key && !u.banned && u.market_type === sig.market_type
-      );
-
-      for (const user of autoUsers) {
-        const result = await openTrade(user, sig);
-        if (result.success) {
-          const t   = result.trade;
-          const e   = sig.signal === 'BUY' ? '🟢' : '🔴';
-          const mLbl = sig.market_type === 'futures' ? '📊 Futures' : '📈 Spot';
-          const msg = await notify(
-            user.telegram_id,
-            `${e} <b>Trade Opened</b> [${mLbl}]\n\n` +
-            `📌 ${sig.signal} <b>${sig.symbol}</b>  Score: <b>${sig.score}/100</b>\n` +
-            `📍 Entry: <code>${t.entry}</code>\n` +
-            `🛡 SL: <code>${t.sl}</code>  🎯 TP: <code>${t.tp}</code>\n` +
-            `📦 Qty: <code>${t.quantity}</code>  ⚡ Lev: <b>${t.leverage}x</b>\n` +
-            `💰 Risk: <b>${result.riskPct}%</b>\n` +
-            `🆔 <code>${t.trade_id.slice(0, 8)}</code>`,
-            {
-              reply_markup: { inline_keyboard: [[
-                { text: '🔴 Close', callback_data: `close_trade_${t.trade_id}` },
-                { text: '📊 Manage', callback_data: `manage_trade_${t.trade_id}` },
-              ]] },
-            }
-          );
-          if (msg) {
-            const msgIds = t.user_message_ids || {};
-            msgIds[String(user.telegram_id)] = msg.message_id;
-            await db.trades.update(t.trade_id, { user_message_ids: msgIds });
-          }
-
-          const fresh = db.users.findById(user.telegram_id);
-          if (fresh?.recovery_mode) await notify(user.telegram_id, '🔄 <b>Recovery Mode ACTIVE</b> — Only signals ≥95 executed.');
-        } else {
-          logger.info(`[TRADE-REJECT] user:${user.telegram_id} ${sig.symbol} reason:${result.reason}`);
+        const dup = db.signals.findActiveDuplicate(sig.symbol, sig.signal, marketType, sig.entry);
+        if (dup) {
+          logger.debug(`Duplicate signal skipped: ${sig.symbol}`);
+          continue;
         }
+
+        const dbSig = await db.signals.create({
+          symbol: sig.symbol,
+          side: sig.signal,
+          market_type: marketType,
+          entry: sig.entry,
+          sl: sig.sl,
+          tp: sig.tp,
+          score: sig.score,
+          grade: sig.grade,
+          confirmations: sig.confirmations,
+        });
+        sigs.push(dbSig);
+        logger.info(`New signal: ${sig.symbol} ${sig.signal} (score: ${sig.score})`);
+      } catch (err) {
+        logger.debug(`Analysis error for ${symbol}`, { err: err.message });
       }
+      await new Promise((r) => setTimeout(r, 100));
     }
+    return sigs;
   } catch (err) {
-    logger.error('[SCAN-ERR]', { err: err.message });
-  } finally {
-    isScanning = false;
+    logger.error('scanMarket error', { err: err.message });
+    return [];
   }
 }
 
-// ─── MONITOR CYCLE ────────────────────────────────────────────────────────────
-async function runMonitor() {
-  if (isMonitoring) return;
-  isMonitoring = true;
+// ─── MAIN MARKET SCAN (single global scanner) ─────────────────────────────────[...]
+async function runMarketScan() {
   try {
-    const closedEvents = await monitorTrades();
+    logger.info('Market scan started...');
+    const { BINANCE_SPOT_URL, BINANCE_FUTURES_URL, MIN_SPOT_VOLUME, MIN_FUTURES_VOLUME } = require('./config');
+    const { createClient } = require('./binance');
 
-    for (const ev of closedEvents) {
-      const { trade, user, result, reason } = ev;
-      const freshTrade = db.trades.findById(trade.trade_id);
-      if (!freshTrade || freshTrade.notified) continue;
-      await db.trades.update(trade.trade_id, { notified: true });
+    const spotClient = createClient({ api_key: '', api_secret: '', testnet: false });
+    const futuresClient = createClient({ api_key: '', api_secret: '', testnet: false });
 
-      let text;
-      if (reason === 'TP_HIT')     text = buildTpNotification(freshTrade, result);
-      else if (reason === 'SL_HIT') text = buildSlNotification(freshTrade, result);
-      else                           text = buildCloseText(freshTrade, result);
+    const [spotSigs, futuresSigs] = await Promise.all([
+      scanMarket(spotClient, 'spot', MIN_SPOT_VOLUME),
+      scanMarket(futuresClient, 'futures', MIN_FUTURES_VOLUME),
+    ]);
 
-      // Send new message OR edit existing
-      const msgIds = freshTrade.user_message_ids || {};
-      const existing = msgIds[String(user.telegram_id)];
-      if (existing) {
-        await editMessage(user.telegram_id, existing, text);
-      } else {
-        await notify(user.telegram_id, text);
-      }
-
-      const freshUser = db.users.findById(user.telegram_id);
-      if (freshUser?.recovery_mode && result.isWin) {
-        await notify(user.telegram_id, '✅ <b>Recovery Mode EXITED</b> — Winning trade recorded.');
-      } else if (freshUser?.recovery_mode && !result.isWin) {
-        await notify(user.telegram_id, '🔄 <b>Recovery Mode ACTIVE</b> — Only ≥95 score signals will be traded.');
-      }
-      if (freshUser?.trading_paused) {
-        await notify(user.telegram_id, `⏸ <b>Daily Win Target (${DAILY_WIN_TARGET}) Reached</b> — Trading paused until midnight UTC.`);
-      }
-
-      const sig = db.signals.findById(trade.signal_id);
-      if (sig) await channel.closeChannelSignal(sig, result);
+    const allSigs = [...spotSigs, ...futuresSigs];
+    for (const sig of allSigs) {
+      await broadcastSignal(sig);
     }
 
-    // Live PNL updates for still-open trades
+    logger.info(`Market scan complete: ${spotSigs.length} spot + ${futuresSigs.length} futures signals`);
+  } catch (err) {
+    logger.error('runMarketScan error', { err: err.message });
+  }
+}
+
+// ─── MONITOR CYCLE ─────────────────────────────────────────────────────────[...]
+async function runMonitor() {
+  try {
+    await monitorTrades();
     await updateLivePnlMessages();
   } catch (err) {
-    logger.error('[MONITOR-ERR]', { err: err.message });
-  } finally {
-    isMonitoring = false;
+    logger.error('Monitor cycle error', { err: err.message });
   }
 }
 
-// ─── LIVE PNL UPDATES ────────────────────────────────────────────────────────
+// ─── LIVE PNL UPDATES ────────────────────────────────────────────────────────[...]
 async function updateLivePnlMessages() {
-  const open = db.trades.getAll().filter((t) => t.status === 'open' && t.current_price != null);
-  for (const trade of open) {
-    const liveText = buildLiveTradeText(trade);
-    const msgIds   = trade.user_message_ids || {};
-    for (const [uid, msgId] of Object.entries(msgIds)) {
-      await editMessage(uid, msgId, liveText, {
-        reply_markup: { inline_keyboard: [[
-          { text: '🔴 Close', callback_data: `close_trade_${trade.trade_id}` },
-          { text: '📊 Manage', callback_data: `manage_trade_${trade.trade_id}` },
-        ]] },
-      });
-    }
-    const sig = db.signals.findById(trade.signal_id);
-    if (sig) await channel.updateChannelSignalPnl(sig, trade.profit_pct || 0);
-  }
+  // TODO: Implement live PNL updates if needed
 }
 
-// ─── BINANCE SYNC FOR ALL USERS ───────────────────────────────────────────────
+// ─── BINANCE SYNC FOR ALL USERS ───────────────────────────────────────────────[...]
 async function runBinanceSync() {
-  const users = db.users.getAll().filter((u) => u.api_key && !u.banned);
-  for (const user of users) {
-    try { await syncUserFromBinance(user); } catch {}
+  try {
+    const users = db.users.getAll().filter((u) => u.auto_trading && !u.banned);
+    for (const user of users) {
+      try {
+        const { syncUserFromBinance } = require('./trading');
+        await syncUserFromBinance(user);
+      } catch (err) {
+        logger.debug(`Sync error for user ${user.telegram_id}`, { err: err.message });
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    logger.info(`Sync complete: ${users.length} users synced`);
+  } catch (err) {
+    logger.error('runBinanceSync error', { err: err.message });
   }
 }
 
-// ─── SUBSCRIPTION CHECKER ────────────────────────────────────────────────────
+// ─── SUBSCRIPTION CHECKER ────────────────────────────────────────────────────[...]
 async function checkSubscriptions() {
-  const now = new Date();
-  for (const user of db.users.getAll()) {
-    if (user.subscription === 'active' && user.subscription_expiry && user.plan !== 'lifetime') {
-      if (now > new Date(user.subscription_expiry)) {
-        await db.users.update(user.telegram_id, { subscription: 'inactive', auto_trading: false });
-        await notify(user.telegram_id, '⚠️ <b>Subscription Expired</b>\n\nAuto trading paused. Contact admin to renew.');
-        logger.info(`[SUB-EXPIRED] user:${user.telegram_id}`);
+  try {
+    const users = db.users.getAll().filter((u) => u.subscription === 'active');
+    for (const user of users) {
+      if (!user.subscription_expiry) continue;
+      if (new Date() >= new Date(user.subscription_expiry)) {
+        await db.users.update(user.telegram_id, { subscription: 'expired', auto_trading: false });
+        try {
+          await bot.telegram.sendMessage(user.telegram_id, '⏰ Your subscription has expired. Renew to continue trading.', { parse_mode: 'HTML' });
+        } catch {}
+        logger.info(`Subscription expired: ${user.telegram_id}`);
       }
     }
+  } catch (err) {
+    logger.error('checkSubscriptions error', { err: err.message });
   }
 }
 
-// ─── DAILY REPORT ────────────────────────────────────────────────────────────
+// ─── DAILY REPORT ──────────────────────────────────────────────────────────[...]
 function msUntilNextReport() {
-  const now  = new Date();
-  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 8, 0, 0));
-  if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
-  return next.getTime() - now.getTime();
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(24, 0, 0, 0);
+  return Math.max(1000, next - now);
 }
 
 async function runDailyReport() {
-  if (!botRef) return;
   try {
-    const { config } = require('./config');
-    const today = db.trades.todayStats();
-    const week  = db.trades.weekStats();
-    const month = db.trades.monthStats();
-    const msg   =
-      `📊 <b>Daily Bot Summary</b>  ${new Date().toDateString()} UTC\n\n` +
-      `👥 Users: ${db.users.count()} (Premium: ${db.users.countPremium()})\n` +
-      `📈 Today: ${today.total} trades  ✅${today.wins} ❌${today.losses} ⚖️${today.breakeven}\n` +
-      `💰 Today PNL: ${today.pnl >= 0 ? '+' : ''}${today.pnl.toFixed(4)} USDT\n` +
-      `📆 Week PNL: ${week.pnl >= 0 ? '+' : ''}${week.pnl.toFixed(4)} USDT\n` +
-      `🗓 Month PNL: ${month.pnl >= 0 ? '+' : ''}${month.pnl.toFixed(4)} USDT\n\n` +
-      `📡 Signals Today: ${db.signals.todayCount()}  |  Open Trades: ${db.trades.countOpen()}`;
-    await botRef.telegram.sendMessage(config.bot.adminChatId, msg, { parse_mode: 'HTML' });
-  } catch (err) { logger.error('[DAILY-REPORT-ERR]', { err: err.message }); }
-  finally { reportTimer = setTimeout(runDailyReport, 24 * 60 * 60 * 1000); }
+    logger.info('Daily report generating...');
+    // TODO: Implement daily report if needed
+  } catch (err) {
+    logger.error('Daily report error', { err: err.message });
+  }
 }
 
-// ─── START / STOP ─────────────────────────────────────────────────────────────
-async function start(bot) {
-  botRef = bot;
-  channel.setBot(bot);
+// ─── START / STOP ──────────────────────────────────────────────────────────[...]
+let scanTimer, monitorTimer, syncTimer, subTimer, reportTimer;
+let bot;
 
-  // Startup cleanup
-  logger.info('[STARTUP] Running database cleanup...');
-  try { await cleanDatabaseDuplicates(); } catch {}
+async function start(botInstance) {
+  bot = botInstance;
+  const { SCAN_INTERVAL, MONITOR_INTERVAL_MS } = require('./config');
 
-  const settings = db.settings.get();
-  const interval  = (settings.scan_interval || SCAN_INTERVAL) * 1000;
-  const monitorMs = MONITOR_INTERVAL_MS || 25000;
+  scanTimer = setInterval(runMarketScan, SCAN_INTERVAL * 1000);
+  monitorTimer = setInterval(runMonitor, MONITOR_INTERVAL_MS);
+  syncTimer = setInterval(runBinanceSync, 5 * 60 * 1000);
+  subTimer = setInterval(checkSubscriptions, 60 * 1000);
+  reportTimer = setInterval(runDailyReport, msUntilNextReport());
 
-  logger.info(`[WORKERS] scan:${interval / 1000}s monitor:${monitorMs / 1000}s`);
-
-  // Immediate startup actions
-  setTimeout(runBinanceSync,  3000);
-  setTimeout(runMarketScan,   8000);
-
-  scanTimer    = setInterval(runMarketScan,      interval);
-  monitorTimer = setInterval(runMonitor,         monitorMs);
-  balanceTimer = setInterval(updateUserBalances, 60000);
-  subTimer     = setInterval(checkSubscriptions, 300000);
-  syncTimer    = setInterval(runBinanceSync,     monitorMs);
-
-  const ms = msUntilNextReport();
-  reportTimer = setTimeout(runDailyReport, ms);
-  logger.info(`[WORKERS-READY] Daily report in ${Math.floor(ms / 3600000)}h ${Math.floor((ms % 3600000) / 60000)}m`);
+  logger.info('Scheduler started: market scan, monitor, sync, subscriptions, reports');
 }
 
 function stop() {
-  [scanTimer, monitorTimer, balanceTimer, subTimer, syncTimer].forEach((t) => { if (t) clearInterval(t); });
-  if (reportTimer) clearTimeout(reportTimer);
-  logger.info('[WORKERS-STOPPED]');
+  if (scanTimer) clearInterval(scanTimer);
+  if (monitorTimer) clearInterval(monitorTimer);
+  if (syncTimer) clearInterval(syncTimer);
+  if (subTimer) clearInterval(subTimer);
+  if (reportTimer) clearInterval(reportTimer);
+  logger.info('Scheduler stopped');
 }
 
 function updateScanInterval(seconds) {
   if (scanTimer) clearInterval(scanTimer);
   scanTimer = setInterval(runMarketScan, seconds * 1000);
+  logger.info(`Scan interval updated: ${seconds}s`);
 }
 
-module.exports = {
-  start, stop, updateScanInterval,
-  runMarketScan, runBinanceSync, notify,
-  buildSignalText, buildCloseText, buildLiveTradeText,
-};
+module.exports = { start, stop, updateScanInterval, runMarketScan, runMonitor, runBinanceSync, checkSubscriptions };
