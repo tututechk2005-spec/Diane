@@ -24,19 +24,39 @@ async function getOrCreateCode(userId) {
   return code;
 }
 
+// ─── FIXED REFERRAL SYSTEM ────────────────────────────────────────────────────[...]
 async function applyReferral(refereeId, code, bot) {
   try {
     const referee = db.users.findById(refereeId);
-    if (!referee || referee.referred_by) return; // already used
+    if (!referee) {
+      logger.warn(`Referee not found: ${refereeId}`);
+      return;
+    }
 
+    // Prevent duplicate referrals
+    if (referee.referred_by) {
+      logger.warn(`Referee already has referrer: ${refereeId}`);
+      return;
+    }
+
+    // Find referrer by code
     const all      = db.users.getAll();
     const referrer = all.find((u) => u.referral_code === code);
-    if (!referrer || String(referrer.telegram_id) === String(refereeId)) return;
+    
+    if (!referrer) {
+      logger.warn(`Referrer not found for code: ${code}`);
+      return;
+    }
+
+    // Prevent self-referral
+    if (String(referrer.telegram_id) === String(refereeId)) {
+      logger.warn(`Self-referral attempt: ${refereeId}`);
+      return;
+    }
 
     // Grant referrer extra days
-    const newExpiry = referrer.subscription_expiry
-      ? new Date(Math.max(Date.now(), new Date(referrer.subscription_expiry).getTime()) + REFERRER_DAYS * 86400000).toISOString()
-      : new Date(Date.now() + REFERRER_DAYS * 86400000).toISOString();
+    const currentExpiry = referrer.subscription_expiry ? new Date(referrer.subscription_expiry).getTime() : Date.now();
+    const newExpiry = new Date(Math.max(currentExpiry, Date.now()) + REFERRER_DAYS * 86400000).toISOString();
 
     await db.users.update(referrer.telegram_id, {
       subscription:         'active',
@@ -56,6 +76,7 @@ async function applyReferral(refereeId, code, bot) {
       plan:                'referral',
     });
 
+    // Log referral in referrals table
     await db.referrals.log({
       referrer_id:   referrer.telegram_id,
       referee_id:    refereeId,
@@ -64,6 +85,7 @@ async function applyReferral(refereeId, code, bot) {
       referee_days:  REFEREE_DAYS,
     });
 
+    // Notify referrer
     if (bot) {
       try {
         await bot.telegram.sendMessage(
@@ -74,7 +96,7 @@ async function applyReferral(refereeId, code, bot) {
       } catch {}
     }
 
-    logger.info(`Referral applied: ${referrer.telegram_id} → ${refereeId} (code: ${code})`);
+    logger.info(`✅ Referral applied: ${referrer.telegram_id} → ${refereeId} (code: ${code})`);
   } catch (err) {
     logger.error('applyReferral error', { err: err.message });
   }

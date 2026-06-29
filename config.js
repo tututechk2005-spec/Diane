@@ -9,17 +9,13 @@ const SCORE_MIN_TRADE        = 90;
 const SCORE_PREMIUM          = 95;
 const SCORE_STRONG           = 90;
 const SCORE_LOW_CONF         = 85;
-const SCORE_RECOVERY_MIN     = 95;
 
 const RISK_LOW_CONF          = 0.50;
 const RISK_STRONG            = 0.75;
 const RISK_PREMIUM           = 1.00;
-const RISK_RECOVERY_PREMIUM  = 0.50;
-const RISK_RECOVERY_HIGH     = 0.75;
 
 const DAILY_WIN_TARGET  = 3;
 const DAILY_MAX_LOSSES  = 2;
-const RECOVERY_TRIGGER_LOSSES = 2;
 
 const SCAN_INTERVAL         = 60;
 const MAX_ACTIVE_TRADES     = 5;
@@ -28,9 +24,7 @@ const MIN_FUTURES_VOLUME    = 1000000;
 const SL_ATR_MULT           = 1.5;
 const TP_ATR_MULT           = 3.0;
 const MIN_RR                = 1.5;
-const RECOVERY_MIN_RR       = 3.0;
 
-const SIGNAL_COOLDOWN_MS    = 4 * 60 * 60 * 1000;
 const MONITOR_INTERVAL_MS   = 25000;
 
 const config = {
@@ -47,7 +41,6 @@ const config = {
     channel:  './data/channel.json',
     payment:  './data/payment.json',
     help:     './data/help.json',
-    cooldown: './data/cooldown.json',
     logs:     './logs',
   },
 };
@@ -70,15 +63,11 @@ module.exports = {
   SCORE_PREMIUM,
   SCORE_STRONG,
   SCORE_LOW_CONF,
-  SCORE_RECOVERY_MIN,
   RISK_LOW_CONF,
   RISK_STRONG,
   RISK_PREMIUM,
-  RISK_RECOVERY_PREMIUM,
-  RISK_RECOVERY_HIGH,
   DAILY_WIN_TARGET,
   DAILY_MAX_LOSSES,
-  RECOVERY_TRIGGER_LOSSES,
   SCAN_INTERVAL,
   MAX_ACTIVE_TRADES,
   MIN_SPOT_VOLUME,
@@ -86,7 +75,5 @@ module.exports = {
   SL_ATR_MULT,
   TP_ATR_MULT,
   MIN_RR,
-  RECOVERY_MIN_RR,
-  SIGNAL_COOLDOWN_MS,
   MONITOR_INTERVAL_MS,
 };

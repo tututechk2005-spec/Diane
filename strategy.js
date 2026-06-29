@@ -7,10 +7,9 @@ const {
   SCORE_STRONG,
   SCORE_LOW_CONF,
   MIN_RR,
-  RECOVERY_MIN_RR,
 } = require('./config');
 
-// ─── SCORING WEIGHTS ──────────────────────────────────────────────────────────
+// ─── SCORING WEIGHTS ─────────────────────────────────────────────────────────[...]
 const WEIGHTS = {
   trend_4h:       20,
   trend_1h:       15,
@@ -23,7 +22,7 @@ const WEIGHTS = {
   rsi:             5,
 };
 
-// ─── INDICATOR MATH ───────────────────────────────────────────────────────────
+// ─── INDICATOR MATH ─────────────────────────────────────────────────────────[...]
 
 function ema(values, period) {
   if (values.length < period) return [];
@@ -85,7 +84,7 @@ function parseKlines(raw) {
   }));
 }
 
-// ─── SMC INDICATORS ───────────────────────────────────────────────────────────
+// ─── SMC INDICATORS ─────────────────────────────────────────────────────────[...]
 
 function getTrend(closes, period = 50) {
   const e21 = ema(closes, 21);
@@ -191,21 +190,15 @@ function scoreGrade(score) {
   return 'IGNORE';
 }
 
-// ─── POSITION SIZING ──────────────────────────────────────────────────────────
+// ─── POSITION SIZING ─────────────────────────────────────────────────────────[...]
 
-function getRiskPct(score, recoveryMode) {
+function getRiskPct(score) {
   const {
     RISK_LOW_CONF,
     RISK_STRONG,
     RISK_PREMIUM,
-    RISK_RECOVERY_PREMIUM,
-    RISK_RECOVERY_HIGH,
   } = require('./config');
 
-  if (recoveryMode) {
-    if (score >= 98) return RISK_RECOVERY_HIGH;
-    return RISK_RECOVERY_PREMIUM;
-  }
   if (score >= SCORE_PREMIUM) return RISK_PREMIUM;
   if (score >= SCORE_STRONG)  return RISK_STRONG;
   return RISK_LOW_CONF;
@@ -224,9 +217,9 @@ function atrValid(atrVal, price) {
   return pct >= 0.08 && pct <= 12;
 }
 
-// ─── MAIN ANALYSIS ────────────────────────────────────────────────────────────
+// ─── SNIPER ENTRY: ALL CONFIRMATIONS REQUIRED ─────────────────────────────────[...]
 
-async function analyzeSymbol(client, symbol, userRecoveryMode = false) {
+async function analyzeSymbol(client, symbol) {
   try {
     const [raw4h, raw1h, raw15] = await Promise.all([
       client.getKlines(symbol, '4h', 100),
@@ -247,15 +240,16 @@ async function analyzeSymbol(client, symbol, userRecoveryMode = false) {
     const closes15 = c15.map((c) => c.close);
     const price    = closes15.at(-1);
 
+    // ✓ VOLATILITY CONFIRMATION: ATR must be valid
     const atr15 = atr(c15, 14);
     if (!atrValid(atr15, price)) return null;
 
+    // ✓ TREND CONFIRMATION: 4h & 1h must align
     const trend4h = getTrend(closes4h, 50);
     const trend1h = getTrend(closes1h, 50);
-    if (!trend4h) return null;
+    if (!trend4h || !trend1h || trend4h !== trend1h) return null;
 
-    const trendsAgree = trend4h === trend1h;
-
+    // ✓ INDICATOR CONFIRMATION: RSI must be in range
     const rsi15 = rsi(closes15, 14);
     if (rsi15 === null) return null;
 
@@ -298,14 +292,16 @@ async function analyzeSymbol(client, symbol, userRecoveryMode = false) {
     const grade = scoreGrade(score);
     if (grade === 'IGNORE') return null;
 
+    // ✓ MARKET STRUCTURE CONFIRMATION: BOS required
     const hasBOS     = direction === 'bull' ? confs.bos_bull : confs.bos_bear;
-    const volOk      = confs.volume_spike;
-    const canTrade   = score >= SCORE_MIN_TRADE && trendsAgree && hasBOS && volOk;
+    if (!hasBOS) return null;
 
-    const hasCHOCH      = direction === 'bull' ? confs.choch_bull : confs.choch_bear;
-    const recoveryReady = !userRecoveryMode || (
-      score >= 95 && hasBOS && hasCHOCH && confs.order_block && confs.fvg && confs.volume_spike
-    );
+    // ✓ VOLUME CONFIRMATION: Volume spike required
+    const volOk      = confs.volume_spike;
+    if (!volOk) return null;
+
+    // ALL CONFIRMATIONS SATISFIED: Generate signal only if ALL are met
+    const canTrade   = score >= SCORE_MIN_TRADE;
 
     const signalType = direction === 'bull' ? 'BUY' : 'SELL';
 
@@ -314,7 +310,7 @@ async function analyzeSymbol(client, symbol, userRecoveryMode = false) {
       ? entry - atr15 * SL_ATR_MULT
       : entry + atr15 * SL_ATR_MULT;
 
-    // Single TP only (removed TP2)
+    // Single TP
     const tp    = signalType === 'BUY'
       ? entry + atr15 * TP_ATR_MULT
       : entry - atr15 * TP_ATR_MULT;
@@ -323,7 +319,8 @@ async function analyzeSymbol(client, symbol, userRecoveryMode = false) {
     const rrRaw  = Math.abs(tp - entry) / slDist;
     const rr     = parseFloat(rrRaw.toFixed(2));
 
-    const rrOk   = userRecoveryMode ? rr >= RECOVERY_MIN_RR : rr >= MIN_RR;
+    const rrOk   = rr >= MIN_RR;
+    if (!rrOk) return null;
 
     return {
       symbol,
@@ -335,17 +332,17 @@ async function analyzeSymbol(client, symbol, userRecoveryMode = false) {
       rr,
       score,
       grade,
-      canTrade:  canTrade && recoveryReady && rrOk,
-      trendsAgree,
+      canTrade,
+      trendsAgree: true,
       confirmations: {
         trend_4h:    trend4h === direction,
         trend_1h:    trend1h === direction,
         bos:         hasBOS,
-        choch:       hasCHOCH,
+        choch:       direction === 'bull' ? confs.choch_bull : confs.choch_bear,
         order_block: confs.order_block,
         fvg:         confs.fvg,
         liq_sweep:   confs.liq_sweep,
-        volume_spike: confs.volume_spike,
+        volume_spike: volOk,
         rsi:         confs.rsi,
       },
       rsi_value: rsi15.toFixed(1),
