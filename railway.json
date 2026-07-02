@@ -1,0 +1,23 @@
+{
+  "$schema": "https://railway.app/json-schema/railway.json",
+  "build": {
+    "builder": "nixpacks",
+    "buildCommand": "npm ci --no-cache && npm run verify"
+  },
+  "deploy": {
+    "numReplicas": 1,
+    "startCommand": "node --no-warnings index.js",
+    "restartPolicyMaxRetries": 5,
+    "healthchecks": {
+      "tcp": {
+        "command": "node -e \"console.log('health')\"",
+        "interval": 30,
+        "timeout": 10
+      }
+    }
+  },
+  "variables": {
+    "NODE_ENV": "production",
+    "NODE_OPTIONS": "--no-warnings"
+  }
+}
